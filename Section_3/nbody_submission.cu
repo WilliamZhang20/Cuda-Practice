@@ -39,11 +39,11 @@ void bodyForce(Body *p, float dt, int n) {
 }
 
 __global__
-void posIntegrate(Body *p, float dt, int n) {
-		int i = threadIdx.x + blockIdx.x * blockDim.x;
-		p[i].x += p[i].vx*dt;
-		p[i].y += p[i].vy*dt;
-		p[i].z += p[i].vz*dt;
+void posIntegrate(Body *p, float dt) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    p[i].x += p[i].vx*dt;
+    p[i].y += p[i].vy*dt;
+    p[i].z += p[i].vz*dt;
 }
 
 int main(const int argc, const char** argv) {
@@ -75,17 +75,21 @@ int main(const int argc, const char** argv) {
   int bytes = nBodies * sizeof(Body);
   float *buf;
 	 
-  // Memory intended to be kept on the DEVICE
-  cudaMalloc(&buf, bytes);
-
-  Body *p = (Body*)buf;
+  cudaMallocHost(&buf, bytes);
 
   read_values_from_file(initialized_values, buf, bytes);
+
+  Body *pHost = (Body*)buf; // CPU reinterpretation at the pointer value
+
+  Body *p; // to be stored in GPU
+  cudaMalloc(&p, bytes);
+
+  cudaMemcpy(p, pHost, bytes, cudaMemcpyHostToDevice);
   
   size_t threadsPerBlock;
   size_t numBlocks;
-  threadsPerBlock = 512;
-  numBlocks = ceil(nBodies / threadsPerBlock);
+  threadsPerBlock = 256;
+  numBlocks = (nBodies / threadsPerBlock);
   // Whatever the # of threads per block, those threads aren't in parallel
   // Warps of same instruction are parallel - i.e. SIMT
   
@@ -120,7 +124,7 @@ int main(const int argc, const char** argv) {
 		
 		// Parallelized position integration since many operations of same style
 		// since nBodies operations - same optimization mechanism for grid config
-    posIntegrate<<<numBlocks, threadsPerBlock>>>(p, dt, nBodies);
+    posIntegrate<<<numBlocks, threadsPerBlock>>>(p, dt);
     
     error = cudaGetLastError();
     if (error != cudaSuccess) {
@@ -135,6 +139,9 @@ int main(const int argc, const char** argv) {
 
   double avgTime = totalTime / (double)(nIters);
   float billionsOfOpsPerSecond = 1e-9 * nBodies * nBodies / avgTime;
+
+  cudaMemcpy(buf, p, bytes, cudaMemcpyDeviceToHost);
+ 
   write_values_to_file(solution_values, buf, bytes);
 
   // You will likely enjoy watching this value grow as you accelerate the application,
@@ -142,5 +149,7 @@ int main(const int argc, const char** argv) {
   // unrealistically high values.
   printf("%0.3f Billion Interactions / second\n", billionsOfOpsPerSecond);
 
-  cudaFree(buf);
+
+  cudaFree(p);
+  cudaFreeHost(buf);
 }
