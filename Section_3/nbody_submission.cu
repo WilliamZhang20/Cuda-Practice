@@ -24,7 +24,7 @@ void bodyForce(Body *p, float dt, int n) {
 
     float Fx = 0.0f; float Fy = 0.0f; float Fz = 0.0f;
 
-    for (int j = 0; j < n; j++) {
+    for (int j = 0; j < n; j++) { // future goal - PARALLELIZE this with streams!!!
       float dx = p[j].x - p[i].x;
       float dy = p[j].y - p[i].y;
       float dz = p[j].z - p[i].z;
@@ -38,13 +38,20 @@ void bodyForce(Body *p, float dt, int n) {
     p[i].vx += dt*Fx; p[i].vy += dt*Fy; p[i].vz += dt*Fz;
 }
 
+__global__
+void posIntegrate(Body *p, float dt, int n) {
+		int i = threadIdx.x + blockIdx.x * blockDim.x;
+		p[i].x += p[i].vx*dt;
+		p[i].y += p[i].vy*dt;
+		p[i].z += p[i].vz*dt;
+}
 
 int main(const int argc, const char** argv) {
 
   // The assessment will test against both 2<11 and 2<15.
   // Feel free to pass the command line argument 15 when you generate ./nbody report files
   int nBodies = 2<<11;
-  if (argc > 1) nBodies = 2<<atoi(argv[1]);
+  if (argc > 1) nBodies = 2<<atoi(argv[1]); // possible reassignment of nBodies
 
   // The assessment will pass hidden initialized values to check for correctness.
   // You should not make changes to these files, or else the assessment will not work.
@@ -67,24 +74,21 @@ int main(const int argc, const char** argv) {
 
   int bytes = nBodies * sizeof(Body);
   float *buf;
-
-  cudaMallocManaged(&buf, bytes);
+	 
+  // Memory intended to be kept on the DEVICE
+  cudaMalloc(&buf, bytes);
 
   Body *p = (Body*)buf;
 
   read_values_from_file(initialized_values, buf, bytes);
-
-  // Initialize kernel traits
-  int deviceId;
-  cudaGetDevice(&deviceId);
-    int numberOfSMs;
-  cudaDeviceGetAttribute(&numberOfSMs, cudaDevAttrMultiProcessorCount, deviceId);
-
+  
   size_t threadsPerBlock;
   size_t numBlocks;
-  threadsPerBlock = 256;
-  numBlocks = nBodies / threadsPerBlock; // will be a multiple of 2, at least
-
+  threadsPerBlock = 512;
+  numBlocks = ceil(nBodies / threadsPerBlock);
+  // Whatever the # of threads per block, those threads aren't in parallel
+  // Warps of same instruction are parallel - i.e. SIMT
+  
   double totalTime = 0.0;
 
   /*
@@ -94,8 +98,7 @@ int main(const int argc, const char** argv) {
 
   for (int iter = 0; iter < nIters; iter++) {
     StartTimer();
-    cudaMemPrefetchAsync(p, bytes, deviceId);
-  /*
+	  /*
    * You will likely wish to refactor the work being done in bodyForce,
    * and potentially the work to integrate the positions.
    */
@@ -109,19 +112,22 @@ int main(const int argc, const char** argv) {
     cudaError_t asyncErr;
     asyncErr = cudaDeviceSynchronize();
     if(asyncErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(asyncErr));
-   
-    cudaMemPrefetchAsync(p, bytes, cudaCpuDeviceId);
-
-  /*
+    
+    /*
    * This position integration cannot occur until this round of bodyForce has completed.
    * Also, the next round of bodyForce cannot begin until the integration is complete.
    */
-
-    for (int i = 0 ; i < nBodies; i++) { // integrate position
-      p[i].x += p[i].vx*dt;
-      p[i].y += p[i].vy*dt;
-      p[i].z += p[i].vz*dt;
+		
+		// Parallelized position integration since many operations of same style
+		// since nBodies operations - same optimization mechanism for grid config
+    posIntegrate<<<numBlocks, threadsPerBlock>>>(p, dt, nBodies);
+    
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error: %s\n", cudaGetErrorString(error));
     }
+    asyncErr = cudaDeviceSynchronize();
+    if(asyncErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(asyncErr));
 
     const double tElapsed = GetTimer() / 1000.0;
     totalTime += tElapsed;
