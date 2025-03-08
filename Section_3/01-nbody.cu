@@ -18,32 +18,45 @@ typedef struct { float x, y, z, vx, vy, vz; } Body;
  * on all others.
  */
 
+__global__
 void bodyForce(Body *p, float dt, int n) {
-  for (int i = 0; i < n; ++i) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
     float Fx = 0.0f; float Fy = 0.0f; float Fz = 0.0f;
 
-    for (int j = 0; j < n; j++) {
+    for (int j = 0; j < n; j++) { // future goal - PARALLELIZE this with streams!!!
       float dx = p[j].x - p[i].x;
       float dy = p[j].y - p[i].y;
       float dz = p[j].z - p[i].z;
       float distSqr = dx*dx + dy*dy + dz*dz + SOFTENING;
       float invDist = rsqrtf(distSqr);
       float invDist3 = invDist * invDist * invDist;
-
+    
       Fx += dx * invDist3; Fy += dy * invDist3; Fz += dz * invDist3;
     }
 
     p[i].vx += dt*Fx; p[i].vy += dt*Fy; p[i].vz += dt*Fz;
-  }
 }
 
+__global__
+void posIntegrate(Body *p, float dt) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    p[i].x += p[i].vx*dt;
+    p[i].y += p[i].vy*dt;
+    p[i].z += p[i].vz*dt;
+}
 
 int main(const int argc, const char** argv) {
 
   // The assessment will test against both 2<11 and 2<15.
   // Feel free to pass the command line argument 15 when you generate ./nbody report files
   int nBodies = 2<<11;
-  if (argc > 1) nBodies = 2<<atoi(argv[1]);
+  if (argc > 1) nBodies = 2<<atoi(argv[1]); // possible reassignment of nBodies
+
+  int deviceId;
+  int numberOfSMs;
+
+  cudaGetDevice(&deviceId);
+  cudaDeviceGetAttribute(&numberOfSMs, cudaDevAttrMultiProcessorCount, deviceId);
 
   // The assessment will pass hidden initialized values to check for correctness.
   // You should not make changes to these files, or else the assessment will not work.
@@ -66,13 +79,25 @@ int main(const int argc, const char** argv) {
 
   int bytes = nBodies * sizeof(Body);
   float *buf;
-
-  buf = (float *)malloc(bytes);
-
-  Body *p = (Body*)buf;
+	 
+  cudaMallocHost(&buf, bytes);
 
   read_values_from_file(initialized_values, buf, bytes);
 
+  Body *pHost = (Body*)buf; // CPU reinterpretation at the pointer value
+
+  Body *p; // to be stored in GPU
+  cudaMalloc(&p, bytes);
+
+  cudaMemcpy(p, pHost, bytes, cudaMemcpyHostToDevice);
+  
+  size_t threadsPerBlock;
+  size_t numBlocks;
+  threadsPerBlock = 256;
+  numBlocks = nBodies / threadsPerBlock;
+  // Whatever the # of threads per block, those threads aren't in parallel
+  // Warps of same instruction are parallel - i.e. SIMT
+  
   double totalTime = 0.0;
 
   /*
@@ -82,24 +107,30 @@ int main(const int argc, const char** argv) {
 
   for (int iter = 0; iter < nIters; iter++) {
     StartTimer();
-
-  /*
-   * You will likely wish to refactor the work being done in `bodyForce`,
+	  /*
+   * You will likely wish to refactor the work being done in bodyForce,
    * and potentially the work to integrate the positions.
    */
 
-    bodyForce(p, dt, nBodies); // compute interbody forces
-
-  /*
-   * This position integration cannot occur until this round of `bodyForce` has completed.
-   * Also, the next round of `bodyForce` cannot begin until the integration is complete.
+    bodyForce<<<numBlocks, threadsPerBlock>>>(p, dt, nBodies); // compute interbody force
+    
+    /*
+   * This position integration cannot occur until this round of bodyForce has completed.
+   * Also, the next round of bodyForce cannot begin until the integration is complete.
    */
+    
+    // Parallelized position integration since many operations of same style
+    // since nBodies operations - same optimization mechanism for grid config
 
-    for (int i = 0 ; i < nBodies; i++) { // integrate position
-      p[i].x += p[i].vx*dt;
-      p[i].y += p[i].vy*dt;
-      p[i].z += p[i].vz*dt;
+    posIntegrate<<<numBlocks, threadsPerBlock>>>(p, dt);
+    
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error: %s\n", cudaGetErrorString(error));
     }
+    cudaError_t asyncErr;
+    asyncErr = cudaDeviceSynchronize();
+    if(asyncErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(asyncErr));
 
     const double tElapsed = GetTimer() / 1000.0;
     totalTime += tElapsed;
@@ -107,6 +138,9 @@ int main(const int argc, const char** argv) {
 
   double avgTime = totalTime / (double)(nIters);
   float billionsOfOpsPerSecond = 1e-9 * nBodies * nBodies / avgTime;
+
+  cudaMemcpy(buf, p, bytes, cudaMemcpyDeviceToHost);
+ 
   write_values_to_file(solution_values, buf, bytes);
 
   // You will likely enjoy watching this value grow as you accelerate the application,
@@ -114,5 +148,7 @@ int main(const int argc, const char** argv) {
   // unrealistically high values.
   printf("%0.3f Billion Interactions / second\n", billionsOfOpsPerSecond);
 
-  free(buf);
+
+  cudaFree(p);
+  cudaFreeHost(buf);
 }

@@ -5,6 +5,9 @@ All important contents from "Getting Started with Accelerated Computing in CUDA 
 ## Contents:
 
 Section 1: Introduction
+- Heat Conduction
+- Matrix Multiplication
+- Adding two vectors with strides
 
 Section 2: Unified Memory
 - Adding 2 very large vectors
@@ -27,6 +30,8 @@ The development was iterative & profile-driven, with each version analyzed using
 In my first successful version, only the force calculations were parallelized. While this "passed" the threshold, it was inefficient. Over 10 iterations, each iteration involved a transfer between host & device.
 
 In my second version, I delegated memory transfers to only before and after all iterations of interaction computation, the latter of which was entirely parallelized. This meant that position integration had to be made into another kernel, which took the address of the array in the GPU device as an argument.
+
+In my third version, I tried incorporating streams to further accelerate. Seems that has not been done correctly, since the effect has only been slowdown.
 
 Here is what the NSys profile looks like for the best version by far (the second):
 - The green at the start and pink at the end are memory transfers.
