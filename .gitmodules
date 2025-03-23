@@ -1,0 +1,3 @@
+[submodule "nvidia-cuda-course"]
+	path = nvidia-cuda-course
+	url = https://github.com/WilliamZhang20/nvidia-cuda-course
