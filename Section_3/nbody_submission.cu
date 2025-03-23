@@ -24,7 +24,9 @@ void bodyForce(Body *p, float dt, int n) {
 
     float Fx = 0.0f; float Fy = 0.0f; float Fz = 0.0f;
 
-    for (int j = 0; j < n; j++) { // future goal - use dynamic parallelism
+    // This loop cannot be parallelized with dynamic parallelism. Why? Because it's already launched so many threads
+    // The overhead would be enormous
+    for (int j = 0; j < n; j++) { 
       float dx = p[j].x - p[i].x;
       float dy = p[j].y - p[i].y;
       float dz = p[j].z - p[i].z;
@@ -108,6 +110,17 @@ int main(const int argc, const char** argv) {
    */
 
     bodyForce<<<numBlocks, threadsPerBlock>>>(p, dt, nBodies); // compute interbody force
+
+    // No synchronization directive between kernels - they are automatically blocking when on the same stream
+
+    /*
+   * This position integration cannot occur until this round of bodyForce has completed.
+   * Also, the next round of bodyForce cannot begin until the integration is complete.
+   */
+		
+    // Parallelized position integration since many operations of same style
+    // since nBodies operations - same optimization mechanism for grid config
+    posIntegrate<<<numBlocks, threadsPerBlock>>>(p, dt);
     
     cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess) {
@@ -117,22 +130,6 @@ int main(const int argc, const char** argv) {
     asyncErr = cudaDeviceSynchronize();
     if(asyncErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(asyncErr));
     
-    /*
-   * This position integration cannot occur until this round of bodyForce has completed.
-   * Also, the next round of bodyForce cannot begin until the integration is complete.
-   */
-		
-		// Parallelized position integration since many operations of same style
-		// since nBodies operations - same optimization mechanism for grid config
-    posIntegrate<<<numBlocks, threadsPerBlock>>>(p, dt);
-    
-    error = cudaGetLastError();
-    if (error != cudaSuccess) {
-        printf("CUDA error: %s\n", cudaGetErrorString(error));
-    }
-    asyncErr = cudaDeviceSynchronize();
-    if(asyncErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(asyncErr));
-
     const double tElapsed = GetTimer() / 1000.0;
     totalTime += tElapsed;
   }
