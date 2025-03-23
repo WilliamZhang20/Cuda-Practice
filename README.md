@@ -6,7 +6,7 @@ Implemented in the course "Getting Started with Accelerated Computing in CUDA C/
 
 Contains a final project to engineer a GPU-accelerated simulation of gravitationally-induced motion between many bodies, aka the N-Body Problem.
 
-See section below on [the final project](the-final-project).
+See section below on [the final project](#the-final-project).
 
 ## Contents:
 

@@ -24,7 +24,7 @@ void bodyForce(Body *p, float dt, int n) {
 
     float Fx = 0.0f; float Fy = 0.0f; float Fz = 0.0f;
 
-    for (int j = 0; j < n; j++) { // future goal - PARALLELIZE this with streams!!!
+    for (int j = 0; j < n; j++) { // future goal - use dynamic parallelism
       float dx = p[j].x - p[i].x;
       float dy = p[j].y - p[i].y;
       float dz = p[j].z - p[i].z;
