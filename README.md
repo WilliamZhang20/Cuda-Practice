@@ -50,10 +50,18 @@ A future version would involve implementing the Barnes-Hut algorithm, involving 
 
 A simpler approach could also be to delegate things to separate streams, and then overlap computation and memory transfer using the streams. I can already see many improvements I can make to `Section_3/nbody_streams.cu`, but it is a matter of getting time to do it...
 
-## Measuring Performance
+### Future Additions
+
+The next step to accelerate the computation of the n-body problem solver is to improve its time complexity.
+
+Currently it is O(n^2), but with the Barnes-Hut Algorithm using octrees in 3D, I can improve it to O(N*logN).
+
+There have already been studies on it, such as [this](https://medium.com/@hsinhungw/optimizing-n-body-simulation-with-barnes-hut-algorithm-and-cuda-c76e78228c28) one using quadtrees.
+
+## CUDA N-Body Problem Benchmarks
 
 Performance measurements for 65536 bodies over 10 time iterations $$dt$$:
-- The third version took 0.1911 seconds at 419.566 Billion Interactions / second
+- The third version took 0.1911 seconds at 419.566 Billion I)nteractions / second
 - The fourth version took 0.1813s seconds at 467.296 Billion Interactions / second
 - The fifth version took 0.1443s seconds at 715.983 Billion Interactions / second
 
