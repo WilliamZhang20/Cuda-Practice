@@ -9,89 +9,100 @@
 #define SOFTENING 1e-9f
 #define BLOCK_SIZE 256
 #define MAX_BODIES_PER_LEAF 64
-#define MAX_LEVELS 10
-#define M 8
+#define M 4  // monopole + dipole x,y,z
 
 struct Body {
     float x, y, z;
     float vx, vy, vz;
 };
 
-// Simple multipole representation for a cluster
+// Multipole: monopole + dipole
 struct Multipole {
-    float coeff[M];  // Multipole expansion coefficients
-    float cx, cy, cz; // Center of cluster
+    float coeff[M];  // coeff[0]=mass, coeff[1..3]=dipole
+    float cx, cy, cz; // center
 };
 
-// Kernel: assign bodies to clusters 
-__global__ void assignBodiesToClusters(int *bodyClusterMap, int nBodies, int nClusters) {
+// Leaf assignment
+__global__ void assignBodiesToLeaves(int *bodyLeafMap, int nBodies, int nLeaves){
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i >= nBodies) return;
-
-    int clusterIdx = i * nClusters / nBodies;
-    bodyClusterMap[i] = clusterIdx;
+    if(i>=nBodies) return;
+    int leafIdx = i * nLeaves / nBodies; // simple 1D mapping
+    bodyLeafMap[i] = leafIdx;
 }
 
-__global__ void computeMultipoles(Body *bodies, Multipole *clusters, int *bodyClusterMap, int nBodies) {
+// Compute leaf multipoles (monopole + dipole)
+__global__ void computeLeafMultipoles(Body *bodies, Multipole *leaves, int *bodyLeafMap, int nBodies){
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i >= nBodies) return;
+    if(i>=nBodies) return;
 
-    int clusterIdx = bodyClusterMap[i];
+    int leaf = bodyLeafMap[i];
+    Body b = bodies[i];
 
-    // Use atomic adds to compute cluster center (simplified)
-    atomicAdd(&clusters[clusterIdx].cx, bodies[i].x);
-    atomicAdd(&clusters[clusterIdx].cy, bodies[i].y);
-    atomicAdd(&clusters[clusterIdx].cz, bodies[i].z);
+    atomicAdd(&leaves[leaf].coeff[0], 1.0f);
+    atomicAdd(&leaves[leaf].coeff[1], b.x);
+    atomicAdd(&leaves[leaf].coeff[2], b.y);
+    atomicAdd(&leaves[leaf].coeff[3], b.z);
 
-    // For illustration, coeff[0] = mass = 1
-    atomicAdd(&clusters[clusterIdx].coeff[0], 1.0f);
+    atomicAdd(&leaves[leaf].cx, b.x);
+    atomicAdd(&leaves[leaf].cy, b.y);
+    atomicAdd(&leaves[leaf].cz, b.z);
 }
 
-__global__ void finalizeClusterCenters(Multipole *clusters, int *clusterCounts, int nClusters) {
+// Finalize leaf centers
+__global__ void finalizeLeafCenters(Multipole *leaves, int *leafCounts, int nLeaves){
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i >= nClusters) return;
+    if(i>=nLeaves) return;
 
-    if (clusterCounts[i] > 0) {
-        clusters[i].cx /= clusterCounts[i];
-        clusters[i].cy /= clusterCounts[i];
-        clusters[i].cz /= clusterCounts[i];
+    if(leafCounts[i]>0){
+        leaves[i].cx /= leafCounts[i];
+        leaves[i].cy /= leafCounts[i];
+        leaves[i].cz /= leafCounts[i];
     }
 }
 
-// Multipole-to-local translation using cuBLAS tensor cores (simplified)
-void multipoleToLocal(cublasHandle_t handle, Multipole *multipoles, Multipole *locals, int nClusters) {
-    // For simplicity, treat multipole coeffs as matrices and do identity translation
-    float alpha = 1.0f, beta = 0.0f;
-    // A = multipoles coeffs, B = identity, C = locals
-    cublasGemmEx(handle,
-                 CUBLAS_OP_N, CUBLAS_OP_N,
-                 M, 1, 1,
-                 &alpha,
-                 multipoles, CUDA_R_32F, M,
-                 nullptr, CUDA_R_32F, 1,
-                 &beta,
-                 locals, CUDA_R_32F, M,
-                 CUDA_R_32F,
-                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+// Compute near-field forces within leaves
+__global__ void nearFieldForces(Body *bodies, int *bodyLeafMap, int nBodies, float dt){
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if(i>=nBodies) return;
+
+    int leaf = bodyLeafMap[i];
+    Body bi = bodies[i];
+
+    for(int j=0;j<nBodies;j++){
+        if(i==j) continue;
+        if(bodyLeafMap[j]!=leaf) continue;
+
+        Body bj = bodies[j];
+        float dx = bj.x - bi.x;
+        float dy = bj.y - bi.y;
+        float dz = bj.z - bi.z;
+        float r2 = dx*dx + dy*dy + dz*dz + SOFTENING;
+        float invR3 = rsqrtf(r2*r2*r2);
+
+        bi.vx += dt * dx * invR3;
+        bi.vy += dt * dy * invR3;
+        bi.vz += dt * dz * invR3;
+    }
+    bodies[i] = bi;
 }
 
-// Apply local expansions to compute body forces (simplified monopole)
-__global__ void applyLocalExpansions(Body *bodies, Multipole *locals, int *bodyClusterMap, float dt, int nBodies) {
+// Apply local expansions (L2P)
+__global__ void applyLocalExpansions(Body *bodies, Multipole *locals, int *bodyLeafMap, float dt, int nBodies){
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i >= nBodies) return;
+    if(i>=nBodies) return;
 
-    int clusterIdx = bodyClusterMap[i];
-    Multipole local = locals[clusterIdx];
+    int leaf = bodyLeafMap[i];
+    Multipole local = locals[leaf];
 
     float dx = local.cx - bodies[i].x;
     float dy = local.cy - bodies[i].y;
     float dz = local.cz - bodies[i].z;
     float r2 = dx*dx + dy*dy + dz*dz + SOFTENING;
-    float invR3 = rsqrtf(r2 * r2 * r2);
+    float invR3 = rsqrtf(r2*r2*r2);
 
-    float Fx = dx * invR3 * local.coeff[0]; // coeff[0] = total mass
-    float Fy = dy * invR3 * local.coeff[0];
-    float Fz = dz * invR3 * local.coeff[0];
+    float Fx = dx * invR3 * local.coeff[0] - local.coeff[1];
+    float Fy = dy * invR3 * local.coeff[0] - local.coeff[2];
+    float Fz = dz * invR3 * local.coeff[0] - local.coeff[3];
 
     bodies[i].vx += dt * Fx;
     bodies[i].vy += dt * Fy;
@@ -99,21 +110,21 @@ __global__ void applyLocalExpansions(Body *bodies, Multipole *locals, int *bodyC
 }
 
 // Integrate positions
-__global__ void integratePositions(Body *bodies, float dt, int nBodies) {
+__global__ void integratePositions(Body *bodies, float dt, int nBodies){
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i >= nBodies) return;
+    if(i>=nBodies) return;
 
     bodies[i].x += bodies[i].vx * dt;
     bodies[i].y += bodies[i].vy * dt;
     bodies[i].z += bodies[i].vz * dt;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv){
     int nBodies = 2 << 11;
-    if (argc > 1) nBodies = 2 << atoi(argv[1]);
+    if(argc>1) nBodies = 2 << atoi(argv[1]);
 
-    Body *h_bodies = (Body*)malloc(nBodies * sizeof(Body));
-    float *tmp = (float*)malloc(nBodies * 6 * sizeof(float));
+    Body *h_bodies = (Body*)malloc(nBodies*sizeof(Body));
+    float *tmp = (float*)malloc(nBodies*6*sizeof(float));
     read_values_from_file("initialized_file", tmp, nBodies*6*sizeof(float));
     for(int i=0;i<nBodies;i++){
         h_bodies[i] = {tmp[i*6+0], tmp[i*6+1], tmp[i*6+2],
@@ -122,46 +133,43 @@ int main(int argc, char **argv) {
     free(tmp);
 
     Body *d_bodies;
-    cudaMalloc(&d_bodies, nBodies * sizeof(Body));
+    cudaMalloc(&d_bodies, nBodies*sizeof(Body));
     cudaMemcpy(d_bodies, h_bodies, nBodies*sizeof(Body), cudaMemcpyHostToDevice);
 
-    int nClusters = (nBodies + MAX_BODIES_PER_LEAF - 1) / MAX_BODIES_PER_LEAF;
-    Multipole *d_multipoles, *d_locals;
-    int *d_bodyClusterMap;
-    cudaMalloc(&d_multipoles, nClusters * sizeof(Multipole));
-    cudaMalloc(&d_locals, nClusters * sizeof(Multipole));
-    cudaMalloc(&d_bodyClusterMap, nBodies * sizeof(int));
+    int nLeaves = (nBodies + MAX_BODIES_PER_LEAF -1)/MAX_BODIES_PER_LEAF;
+    Multipole *d_leaves;
+    int *d_bodyLeafMap;
+    cudaMalloc(&d_leaves, nLeaves*sizeof(Multipole));
+    cudaMalloc(&d_bodyLeafMap, nBodies*sizeof(int));
+    cudaMemset(d_leaves,0,nLeaves*sizeof(Multipole));
 
-    // Clear multipoles
-    cudaMemset(d_multipoles, 0, nClusters*sizeof(Multipole));
-    cudaMemset(d_locals, 0, nClusters*sizeof(Multipole));
-
-    // Initialize cuBLAS handle
     cublasHandle_t handle;
     cublasCreate(&handle);
 
     const float dt = 0.01f;
     const int nIters = 10;
-    int numBlocks = (nBodies + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int numBlocks = (nBodies + BLOCK_SIZE - 1)/BLOCK_SIZE;
 
-    for (int iter = 0; iter < nIters; iter++) {
+    for(int iter=0; iter<nIters; iter++){
         StartTimer();
 
-        assignBodiesToClusters<<<numBlocks, BLOCK_SIZE>>>(d_bodyClusterMap, nBodies, nClusters);
+        assignBodiesToLeaves<<<numBlocks,BLOCK_SIZE>>>(d_bodyLeafMap,nBodies,nLeaves);
 
-        computeMultipoles<<<numBlocks, BLOCK_SIZE>>>(d_bodies, d_multipoles, d_bodyClusterMap, nBodies);
+        computeLeafMultipoles<<<numBlocks,BLOCK_SIZE>>>(d_bodies,d_leaves,d_bodyLeafMap,nBodies);
 
-        multipoleToLocal(handle, d_multipoles, d_locals, nClusters);
+        cudaMemcpy(d_leaves,d_leaves,nLeaves*sizeof(Multipole),cudaMemcpyDeviceToDevice);
 
-        applyLocalExpansions<<<numBlocks, BLOCK_SIZE>>>(d_bodies, d_locals, d_bodyClusterMap, dt, nBodies);
+        applyLocalExpansions<<<numBlocks,BLOCK_SIZE>>>(d_bodies,d_leaves,d_bodyLeafMap,dt,nBodies);
 
-        integratePositions<<<numBlocks, BLOCK_SIZE>>>(d_bodies, dt, nBodies);
+        nearFieldForces<<<numBlocks,BLOCK_SIZE>>>(d_bodies,d_bodyLeafMap,nBodies,dt);
+
+        integratePositions<<<numBlocks,BLOCK_SIZE>>>(d_bodies,dt,nBodies);
 
         cudaDeviceSynchronize();
-        printf("Iteration %d done.\n", iter);
+        printf("Iteration %d done.\n",iter);
     }
 
-    cudaMemcpy(h_bodies, d_bodies, nBodies*sizeof(Body), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_bodies,d_bodies,nBodies*sizeof(Body),cudaMemcpyDeviceToHost);
 
     float *result = (float*)malloc(nBodies*6*sizeof(float));
     for(int i=0;i<nBodies;i++){
@@ -176,9 +184,8 @@ int main(int argc, char **argv) {
     free(result);
 
     cudaFree(d_bodies);
-    cudaFree(d_multipoles);
-    cudaFree(d_locals);
-    cudaFree(d_bodyClusterMap);
+    cudaFree(d_leaves);
+    cudaFree(d_bodyLeafMap);
     free(h_bodies);
     cublasDestroy(handle);
 
